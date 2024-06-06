@@ -18,10 +18,7 @@ IDENT ?= labkey
 
 PULL_TAG ?= latest
 
-AWS_ACCOUNT_ID ?= $(shell aws sts get-caller-identity | jq -r '.Account' | grep -E '[0-9]{12}' || exit 1)
-AWS_REGION ?= $(shell aws configure get region || exit 1)
-
-LABKEY_VERSION ?= 21.5-SNAPSHOT
+LABKEY_VERSION ?= 24.3.4-6
 LABKEY_DISTRIBUTION ?= community
 LABKEY_EK ?= 123abc456
 
@@ -29,7 +26,7 @@ LABKEY_EK ?= 123abc456
 BUILD_VERSION ?= $(shell      echo '$(LABKEY_VERSION)'      | tr A-Z a-z)
 BUILD_DISTRIBUTION := $(shell echo '$(LABKEY_DISTRIBUTION)' | tr A-Z a-z)
 
-BUILD_REPO_URI ?= $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+BUILD_REPO_URI ?= registry.nersc.gov/m2650/lims
 BUILD_REPO_NAME := labkey/$(BUILD_DISTRIBUTION)
 BUILD_REMOTE_REPO := $(BUILD_REPO_URI)/$(BUILD_REPO_NAME)
 
@@ -52,28 +49,42 @@ endef
 # default actions are: login, build, tag, then push
 all: login build tag push
 
-build:
-	$(call tc,building docker container)
-	docker build \
-		--rm \
-		--compress \
-		$(CACHE_FLAG) \
-		-t $(BUILD_REPO_NAME):latest \
-		-t $(BUILD_LOCAL_TAG) \
-		--build-arg 'FROM_TAG=$(FROM_TAG)' \
-		--build-arg 'DEBUG=$(DEBUG)' \
-		--build-arg 'LABKEY_VERSION=$(LABKEY_VERSION)' \
-		--build-arg 'LABKEY_DISTRIBUTION=$(BUILD_DISTRIBUTION)' \
-		--build-arg 'LABKEY_EK=$(LABKEY_EK)' \
-		.
-
 login:
-	$(call tc,logging in to ECR)
-	aws ecr get-login-password \
-		| docker login \
-			--username AWS \
-			--password-stdin \
-			$(BUILD_REPO_URI)
+	$(call tc,logging in to NERSC)
+	docker login $(BUILD_REPO_URI)
+
+ifeq ($(strip $(findstring Darwin,$(shell uname -a 2>&1 ; ))),)
+	build:
+		$(call tc,building docker container)
+		docker build \
+			--rm \
+			--compress \
+			$(CACHE_FLAG) \
+			-t $(BUILD_REPO_NAME):latest \
+			-t $(BUILD_LOCAL_TAG) \
+			--build-arg 'FROM_TAG=$(FROM_TAG)' \
+			--build-arg 'DEBUG=$(DEBUG)' \
+			--build-arg 'LABKEY_VERSION=$(LABKEY_VERSION)' \
+			--build-arg 'LABKEY_DISTRIBUTION=$(BUILD_DISTRIBUTION)' \
+			--build-arg 'LABKEY_EK=$(LABKEY_EK)' \
+			.
+else
+	build:
+		$(call tc,building docker container)
+		docker buildx build \
+			--platform linux/amd64 \
+			--rm \
+			--compress \
+			$(CACHE_FLAG) \
+			-t $(BUILD_REPO_NAME):latest \
+			-t $(BUILD_LOCAL_TAG) \
+			--build-arg 'FROM_TAG=$(FROM_TAG)' \
+			--build-arg 'DEBUG=$(DEBUG)' \
+			--build-arg 'LABKEY_VERSION=$(LABKEY_VERSION)' \
+			--build-arg 'LABKEY_DISTRIBUTION=$(BUILD_DISTRIBUTION)' \
+			--build-arg 'LABKEY_EK=$(LABKEY_EK)' \
+			.
+endif
 
 tag:
 	$(call tc,tagging docker container)
@@ -137,21 +148,3 @@ test: down
 
 pull: login
 	docker pull $(BUILD_REMOTE_REPO):$(PULL_TAG)
-
-untagged: login
-	$(call tc,removing untagged images from remote repo)
-	aws ecr \
-		list-images \
-		--query 'imageIds[?imageTag == ""].imageDigest' \
-		--repository-name $(BUILD_REPO_NAME) \
-		--output text \
-			| $(_G)xargs \
-				-d $$'\t' \
-				-t \
-				-I{} \
-				-r \
-				aws ecr \
-					batch-delete-image \
-					--repository-name $(BUILD_REPO_NAME) \
-					--image-ids 'imageDigest={}' \
-						| cat
